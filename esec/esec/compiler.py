@@ -5,7 +5,7 @@ and validation.
 import re
 from esec.utils.exceptions import ESDLSyntaxError
 
-_ITER_DEF = '''
+_DEFINITIONS = '''
 def _iter(*srcs):
     assert srcs, "srcs cannot be empty"
     def _conv(i):
@@ -13,14 +13,8 @@ def _iter(*srcs):
     
     for src in srcs:
         for indiv in _conv(src):
-            yield indiv'''
-'''The definition of the ``_iter`` method used in compiled systems. This
-automatically calls ``__iter__`` or ``__call__`` depending on the parameter
-type, allowing constructors and lists to be intermixed. If multiple sequences
-are provided they are concatenated.
-'''
+            yield indiv
 
-_BORN_ITER_DEF = '''
 class _born_iter(object):
     def __init__(self, src):
         self.src = src
@@ -33,19 +27,23 @@ class _born_iter(object):
     
     def next(self):
         return next(self.src).born()'''
-'''The definition of the ``_born_iter`` class used in compiled systems.
-The primary purpose is to call the ``born`` method of individuals after
-a ``FROM/SELECT`` statement. The secondary purpose is to handle calls to
-``rest`` when the underlying sequence does not support it.
-'''
+'''Definitions used in compiled systems.
 
+The ``_iter`` method automatically calls ``__iter__`` or ``__call__`` depending
+on the parameter type, allowing constructors and lists to be used interchangeably.
+If multiple sequences are provided they are concatenated as required by
+``FROM-SELECT`` statements.
+
+The ``_born_iter`` class calls the ``born`` method of individuals after a
+``FROM-SELECT`` statement and handles calls to ``rest`` when the underlying
+sequence does not support it.
+'''
 
 class Compiler(object):
     '''Compiles ESDL into Python scripts.
     '''
     
-    def __init__(self, src, context=None,
-                 short_code=None, include_original=None):
+    def __init__(self, src, short_code=None, include_original=None, indent_size=4):
         '''Initialises the compiler object but does not perform compilation or
         return any code.
         
@@ -57,12 +55,6 @@ class Compiler(object):
             The ESDL code to compile. This string is stored in
             ``self.source_code`` and may be modified or replaced before
             calling `compile`.
-          
-          context : dict [optional]
-            Extra definitions to include in the sandbox global variables.
-            The contents are merged into ``self.context``. `context` is
-            not modified and ``self.context`` must be used when executing
-            the compiled code.
           
           short_code : bool [optional]
             When ``True``, attempts to produce less lines of code by
@@ -76,48 +68,43 @@ class Compiler(object):
             code.
             If not specified, these comments are only included when
             ``__debug__`` is ``True``.
+          
+          indent_size : int [optional]
+            Specifies the number of spaces used for each indent.
         '''
         self.source_code = src
-        self.context = dict(context) if context else {}
         self.short_code = (not __debug__) if short_code == None else short_code
         self.include_original = (__debug__) if include_original == None else include_original
+        self.indent_size = indent_size
         
         self._groups = None
+        self._variables = None
         self.src_lines = None
-        self.reset = None
-        self.breed = None
+        self.code = None
     
     def compile(self):
         '''Compiles the source associated with this compiler object. The result
-        is placed in ``self.reset`` and ``self.breed`` as strings.
+        is placed in ``self.code`` as a string.
         
         May raise `ESDLSyntaxError` if there are syntactical errors in
         ``self.source_code``. Further errors may be raised when executing the
         code produced.
         '''
-        exec _ITER_DEF in self.context      #pylint: disable=W0122
-        exec _BORN_ITER_DEF in self.context #pylint: disable=W0122
-        
         self._groups = set()
+        self._variables = set()
         self.src_lines = list(self._filter_source(self.source_code))
-        code_lines = list(self._transform(self.src_lines))
-        code_blocks = [ [] ]
-        for line in code_lines:
-            if line == None:
-                code_blocks.append([])
-            else:
-                code_blocks[-1].append(line)
+
+        transformed_lines = list(self._transform(self.src_lines))
         
-        if len(code_blocks) > 2:
-            raise ESDLSyntaxError('Code after generation definition.', ("ESDL", None, None, None))
-        elif len(code_blocks) == 2:
-            init_code = '\n'.join(('%s = _group()' % g for g in self._groups))
-            self.reset = init_code + '\n' + '\n'.join(code_blocks[0])
-            self.breed = '\n'.join(code_blocks[1])
-        else:
-            self.reset = None
-            self.breed = None
-            raise ESDLSyntaxError('No generation definition included.', ("ESDL", None, None, None))
+        code_lines = [ _DEFINITIONS ]
+        code_lines.extend('%s = _group()' % g for g in self._groups)
+        code_lines.extend('%s = None' % v for v in self._variables)
+        
+        code_lines.append('__builtins__.update(_globals)')
+        code_lines.append('')
+        code_lines.extend(transformed_lines)
+        
+        self.code = '\n'.join(code_lines)
     
     @classmethod
     def _hide_nested(cls, src):
@@ -208,6 +195,7 @@ class Compiler(object):
         '''
         
         indent = ''
+        indent_size = self.indent_size
         opt_sc = self.short_code
         opt_io = self.include_original
         
@@ -220,24 +208,26 @@ class Compiler(object):
             # through unchanged.
             first_word = parts[0].upper()
             if first_word == 'BEGIN':
-                second_word = parts[2].partition(' ')[0].upper()
-                if second_word == 'GENERATION':
-                    yield None
-                    indent = ''
+                yield indent
+                if opt_io: yield indent + "# Line %02d: %s" % (line_no+1, source_line)
+                
+                block_name = re.match('[ ]*([a-zA-Z_][a-zA-Z0-9_]*)', parts[2])
+                if block_name:
+                    yield indent + "def _block_%s():" % block_name.groups()[0].lower()
+                    indent += ' ' * indent_size
                 else:
-                    raise ESDLSyntaxError('Unrecognised parameter to BEGIN: ' + second_word,
-                                          ("ESDL", line_no+1, None, source_line))
+                    raise ESDLSyntaxError('BEGIN requires a block name.', ("ESDL", line_no+1, None, source_line))
             
             
             elif first_word == 'END':
-                indent = indent[:-4]
+                indent = indent[:-indent_size]
             
             
             elif first_word == 'REPEAT':
                 if opt_io: yield indent + "# Line %02d: %s" % (line_no+1, source_line)
                 
                 yield indent + "for _ in xrange(%s):" % parts[2]
-                indent += ' ' * 4
+                indent += ' ' * indent_size
             
             
             elif first_word == 'FROM':
@@ -352,6 +342,6 @@ class Compiler(object):
                 if opt_io: yield indent + "# Line %02d: %s" % (line_no+1, source_line)
                 assign = re.match('[ ]*([a-zA-Z_][a-zA-Z0-9_]*)[ ]*=', source_line)
                 if assign:
-                    self.context[assign.groups()[0]] = None
+                    self._variables.add(assign.groups()[0])
                 yield indent + source_line
 
