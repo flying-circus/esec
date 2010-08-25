@@ -147,7 +147,6 @@ class Experiment(object):
         
         # -- Landscape (of type and name) --
         self.lscape = self._load(cfg, 'landscape', landscape.Landscape)
-        if not self.lscape: raise ValueError('No landscape provided.')
         cfg.landscape = self.lscape
         
         # -- System --
@@ -156,7 +155,7 @@ class Experiment(object):
         
         # -- Pass full configuration to monitor --
         self.monitor.notify('Experiment', 'System', self.system)
-        self.monitor.notify('Experiment', 'Landscape', self.lscape)
+        if self.lscape: self.monitor.notify('Experiment', 'Landscape', self.lscape)
         self.monitor.notify('Experiment', 'Configuration', cfg)
     
     
